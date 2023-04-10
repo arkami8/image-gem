@@ -38,6 +38,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	upscale := r.URL.Query().Get("upscale") == "true"
 	stripMetadata := r.URL.Query().Get("strip") == "true"
 
 	convertToWebP := convertImageToWebP(r)
@@ -81,7 +82,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if height > 0 || width > 0 {
-		img, err = resizeImage(img, width, height)
+		img, err = resizeImage(img, width, height, upscale)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -215,32 +216,36 @@ func isWebPSupported(acceptHeader string) bool {
 	return strings.Contains(acceptHeader, "image/webp")
 }
 
-func resizeImage(img *vips.ImageRef, width, height int) (*vips.ImageRef, error) {
+func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.ImageRef, error) {
 	if width == 0 && height == 0 {
 		return img, nil
 	}
 
 	if width == 0 {
 		scale := float64(height) / float64(img.Height())
-		err := img.Resize(scale, vips.KernelAuto)
-		if err != nil {
-			return nil, err
+		if upscale || scale <= 1 {
+			err := img.Resize(scale, vips.KernelAuto)
+			if err != nil {
+				return nil, err
+			}
 		}
 		return img, nil
 	}
 
 	if height == 0 {
 		scale := float64(width) / float64(img.Width())
-		err := img.Resize(scale, vips.KernelAuto)
-		if err != nil {
-			return nil, err
+		if upscale || scale <= 1 {
+			err := img.Resize(scale, vips.KernelAuto)
+			if err != nil {
+				return nil, err
+			}
 		}
 		return img, nil
 	}
 
-	if img.Width() > width || img.Height() > height {
-		hScale := float64(width) / float64(img.Width())
-		vScale := float64(height) / float64(img.Height())
+	hScale := float64(width) / float64(img.Width())
+	vScale := float64(height) / float64(img.Height())
+	if upscale || (hScale <= 1 && vScale <= 1) {
 		err := img.ResizeWithVScale(hScale, vScale, vips.KernelAuto)
 		if err != nil {
 			return nil, err
