@@ -32,6 +32,8 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	convertToWebP := convertImageToWebP(r)
+
 	resp, err := http.Get(targetUrl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -71,12 +73,20 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "image/"+strings.TrimPrefix(img.Format().FileExt(), "."))
-	imgBytes, _, err := img.Export(nil)
+	// Export the correct image format
+	var imgBytes []byte
+	if convertToWebP {
+		w.Header().Set("Content-Type", "image/webp")
+		imgBytes, _, err = img.ExportWebp(vips.NewWebpExportParams())
+	} else {
+		w.Header().Set("Content-Type", "image/"+strings.TrimPrefix(img.Format().FileExt(), "."))
+		imgBytes, _, err = img.ExportNative()
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	_, _ = w.Write(imgBytes)
 }
 
@@ -140,6 +150,24 @@ func parseFloatQueryParam(r *http.Request, keys ...string) (float64, error) {
 		}
 	}
 	return 0, nil
+}
+
+func convertImageToWebP(r *http.Request) bool {
+	webpQueryParam := r.URL.Query().Get("webp")
+
+	if webpQueryParam == "force" {
+		return true
+	}
+
+	if webpQueryParam == "auto" {
+		return isWebPSupported(r.Header.Get("Accept"))
+	}
+
+	return false
+}
+
+func isWebPSupported(acceptHeader string) bool {
+	return strings.Contains(acceptHeader, "image/webp")
 }
 
 func resizeImage(img *vips.ImageRef, width, height int) (*vips.ImageRef, error) {
