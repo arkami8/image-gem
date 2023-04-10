@@ -26,11 +26,19 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	quality, err := parseQuality(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	sharpenAmount, blurAmount, err := parseSharpenBlur(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	stripMetadata := r.URL.Query().Get("strip") == "true"
 
 	convertToWebP := convertImageToWebP(r)
 
@@ -41,6 +49,12 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
+	if !isSupportedImageFormat(contentType) {
+		http.Error(w, "Unsupported image format", http.StatusBadRequest)
+		return
+	}
+
 	// Limit the size of the input image
 	limitedReader := io.LimitReader(resp.Body, maxImageSize)
 
@@ -50,6 +64,14 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer img.Close()
+
+	if stripMetadata {
+		err := img.RemoveMetadata()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 
 	if blurAmount > 0 {
 		if err := img.GaussianBlur(blurAmount); err != nil {
@@ -73,21 +95,31 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Export the correct image format
-	var imgBytes []byte
+	targetFormat := vips.ImageTypeUnknown
 	if convertToWebP {
-		w.Header().Set("Content-Type", "image/webp")
-		imgBytes, _, err = img.ExportWebp(vips.NewWebpExportParams())
-	} else {
-		w.Header().Set("Content-Type", "image/"+strings.TrimPrefix(img.Format().FileExt(), "."))
-		imgBytes, _, err = img.ExportNative()
+		targetFormat = vips.ImageTypeWEBP
 	}
+	imgBytes, _, err := ExportImage(img, quality, targetFormat)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 	_, _ = w.Write(imgBytes)
+}
+
+func isSupportedImageFormat(contentType string) bool {
+	supportedFormats := []string{
+		"image/jpeg",
+		"image/png",
+		"image/gif",
+	}
+
+	for _, format := range supportedFormats {
+		if contentType == format {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeURL(url string) string {
@@ -110,6 +142,19 @@ func parseDimensions(r *http.Request) (int, int, error) {
 		return 0, 0, err
 	}
 	return height, width, nil
+}
+
+func parseQuality(r *http.Request) (int, error) {
+	quality, err := parseIntQueryParam(r, "q", "quality")
+	if err != nil {
+		return 0, err
+	}
+
+	if quality < 0 || quality > 100 {
+		return 0, fmt.Errorf("quality must be between 1 and 100")
+	}
+
+	return quality, nil
 }
 
 func parseSharpenBlur(r *http.Request) (float64, float64, error) {
@@ -203,4 +248,56 @@ func resizeImage(img *vips.ImageRef, width, height int) (*vips.ImageRef, error) 
 	}
 
 	return img, nil
+}
+
+func ExportImage(img *vips.ImageRef, quality int, formats ...vips.ImageType) ([]byte, *vips.ImageMetadata, error) {
+	format := img.Format()
+	if len(formats) > 0 {
+		format = formats[0]
+	}
+
+	switch format {
+	case vips.ImageTypeJPEG:
+		params := vips.NewJpegExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportJpeg(params)
+	case vips.ImageTypePNG:
+		return img.ExportPng(vips.NewPngExportParams())
+	case vips.ImageTypeWEBP:
+		params := vips.NewWebpExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportWebp(params)
+	case vips.ImageTypeHEIF:
+		params := vips.NewHeifExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportHeif(params)
+	case vips.ImageTypeTIFF:
+		return img.ExportTiff(vips.NewTiffExportParams())
+	case vips.ImageTypeAVIF:
+		params := vips.NewAvifExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportAvif(params)
+	case vips.ImageTypeJP2K:
+		params := vips.NewJp2kExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportJp2k(params)
+	case vips.ImageTypeGIF:
+		params := vips.NewGifExportParams()
+		if quality >= 1 && quality <= 100 {
+			params.Quality = quality
+		}
+		return img.ExportGIF(params)
+	default:
+		return img.ExportNative()
+	}
 }
