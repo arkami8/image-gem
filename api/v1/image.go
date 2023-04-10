@@ -38,7 +38,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upscale := r.URL.Query().Get("upscale") == "true"
+	upscale := r.URL.Query().Get("up") == "true"
 	stripMetadata := r.URL.Query().Get("strip") == "true"
 
 	convertToWebP := convertImageToWebP(r)
