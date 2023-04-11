@@ -59,6 +59,21 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	// Limit the size of the input image
 	limitedReader := io.LimitReader(resp.Body, maxImageSize)
 
+	// Check if there are any query parameters
+	hasQueryParams := len(r.URL.RawQuery) > 0
+
+	// If there are no query parameters, write the original image data directly to the response and return
+	// If the content type is SVG, write it directly to the response and return. SVGs should be handled in HTML or CSS, not here
+	if !hasQueryParams || contentType == "image/svg+xml" {
+		w.Header().Set("Content-Type", contentType)
+		_, err := io.Copy(w, limitedReader)
+		if err != nil {
+			http.Error(w, "Failed to process image", http.StatusInternalServerError)
+			return
+		}
+		return
+	}
+
 	img, err := vips.NewImageFromReader(limitedReader)
 	if err != nil {
 		http.Error(w, "Failed to decode image", http.StatusBadRequest)
