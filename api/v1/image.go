@@ -43,13 +43,28 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 
 	convertToWebP := convertImageToWebP(r)
 
-	resp, err := http.Get(targetUrl)
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", targetUrl, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	req.Header.Set("User-Agent", "image-gem/v1.0")
+	resp, err := client.Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
+	// Check for HTTP status code
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("Received a %d status code from the server", resp.StatusCode), resp.StatusCode)
+		return
+	}
+
+	// Check for the content type
 	contentType := resp.Header.Get("Content-Type")
 	if !isSupportedImageFormat(contentType) {
 		http.Error(w, "Unsupported image format", http.StatusBadRequest)
@@ -140,7 +155,7 @@ func isSupportedImageFormat(contentType string) bool {
 }
 
 func normalizeURL(url string) string {
-	url = strings.ToLower(html.EscapeString(url))
+	url = html.EscapeString(url)
 	url = strings.ReplaceAll(url, "http:/", "http://")
 	url = strings.ReplaceAll(url, "https:/", "https://")
 	if !strings.Contains(url, "http:") && !strings.Contains(url, "https:") {

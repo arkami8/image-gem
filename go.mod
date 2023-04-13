@@ -6,7 +6,7 @@ require (
 	github.com/davidbyttow/govips/v2 v2.11.0
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
-	github.com/rs/cors v1.8.3
+	github.com/rs/cors v1.9.0
 	github.com/unrolled/secure v1.13.0
 )
 
