@@ -16,6 +16,21 @@ const (
 	maxImageSize = 5 * 1024 * 1024 // 5MB
 )
 
+type countingReader struct {
+	reader       io.Reader
+	bytesRead    int64
+	maxImageSize int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.reader.Read(p)
+	cr.bytesRead += int64(n)
+	if cr.bytesRead > cr.maxImageSize {
+		return n, fmt.Errorf("image size exceeds the allowed limit")
+	}
+	return n, err
+}
+
 func ImageGet(w http.ResponseWriter, r *http.Request) {
 	slugs := mux.Vars(r)
 	targetUrl := normalizeURL(slugs["url"])
@@ -27,6 +42,12 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	quality, err := parseQuality(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	targetFormat, err := parseImageFormat(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -72,7 +93,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Limit the size of the input image
-	limitedReader := io.LimitReader(resp.Body, maxImageSize)
+	countingReader := &countingReader{reader: resp.Body, maxImageSize: maxImageSize}
 
 	// Check if there are any query parameters
 	hasQueryParams := len(r.URL.RawQuery) > 0
@@ -81,7 +102,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	// If the content type is SVG, write it directly to the response and return. SVGs should be handled in HTML or CSS, not here
 	if !hasQueryParams || contentType == "image/svg+xml" {
 		w.Header().Set("Content-Type", contentType)
-		_, err := io.Copy(w, limitedReader)
+		_, err := io.Copy(w, countingReader)
 		if err != nil {
 			http.Error(w, "Failed to process image", http.StatusInternalServerError)
 			return
@@ -89,7 +110,7 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, err := vips.NewImageFromReader(limitedReader)
+	img, err := vips.NewImageFromReader(countingReader)
 	if err != nil {
 		http.Error(w, "Failed to decode image", http.StatusBadRequest)
 		return
@@ -126,7 +147,6 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	targetFormat := vips.ImageTypeUnknown
 	if convertToWebP {
 		targetFormat = vips.ImageTypeWEBP
 	}
@@ -144,6 +164,14 @@ func isSupportedImageFormat(contentType string) bool {
 		"image/png",
 		"image/gif",
 		"image/svg+xml",
+		"image/webp",
+		"image/heic",
+		"image/heif",
+		"image/tiff",
+		"image/tif",
+		"image/avif",
+		"image/jp2",
+		"image/j2k",
 	}
 
 	for _, format := range supportedFormats {
@@ -335,5 +363,35 @@ func ExportImage(img *vips.ImageRef, quality int, formats ...vips.ImageType) ([]
 		return img.ExportGIF(params)
 	default:
 		return img.ExportNative()
+	}
+}
+
+func parseImageFormat(r *http.Request) (vips.ImageType, error) {
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = r.URL.Query().Get("f")
+	}
+
+	switch strings.ToLower(format) {
+	case "":
+		return vips.ImageTypeUnknown, nil
+	case "jpeg", "jpg":
+		return vips.ImageTypeJPEG, nil
+	case "png":
+		return vips.ImageTypePNG, nil
+	case "webp":
+		return vips.ImageTypeWEBP, nil
+	case "heif", "heic":
+		return vips.ImageTypeHEIF, nil
+	case "tiff", "tif":
+		return vips.ImageTypeTIFF, nil
+	case "avif":
+		return vips.ImageTypeAVIF, nil
+	case "jp2k", "j2k":
+		return vips.ImageTypeJP2K, nil
+	case "gif":
+		return vips.ImageTypeGIF, nil
+	default:
+		return vips.ImageTypeUnknown, fmt.Errorf("unsupported image format: %s", format)
 	}
 }
