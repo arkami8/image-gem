@@ -110,10 +110,32 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, err := vips.NewImageFromReader(countingReader)
-	if err != nil {
-		http.Error(w, "Failed to decode image", http.StatusBadRequest)
-		return
+	var img *vips.ImageRef
+	if contentType == "image/gif" {
+		data, err := io.ReadAll(countingReader)
+		if err != nil {
+			http.Error(w, "Failed to decode image", http.StatusBadRequest)
+			return
+		}
+
+		intSet := vips.IntParameter{}
+		intSet.Set(-1)
+
+		params := vips.NewImportParams()
+		params.NumPages = intSet
+
+		img, err = vips.LoadImageFromBuffer(data, params)
+		if err != nil {
+			http.Error(w, "Failed to decode image", http.StatusBadRequest)
+			return
+		}
+		targetFormat = vips.ImageTypeGIF
+	} else {
+		img, err = vips.NewImageFromReader(countingReader)
+		if err != nil {
+			http.Error(w, "Failed to decode image", http.StatusBadRequest)
+			return
+		}
 	}
 	defer img.Close()
 
