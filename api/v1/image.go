@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -302,8 +303,11 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 		return img, nil
 	}
 
+	places := 1
+
 	if width == 0 {
-		scale := float64(height) / float64(img.Height())
+		scale := float64(height) / float64(img.PageHeight())
+		scale = roundToDecimalPlaces(scale, places)
 		if upscale || scale <= 1 {
 			err := img.Resize(scale, vips.KernelAuto)
 			if err != nil {
@@ -315,6 +319,7 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 
 	if height == 0 {
 		scale := float64(width) / float64(img.Width())
+		scale = roundToDecimalPlaces(scale, places)
 		if upscale || scale <= 1 {
 			err := img.Resize(scale, vips.KernelAuto)
 			if err != nil {
@@ -325,7 +330,7 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 	}
 
 	hScale := float64(width) / float64(img.Width())
-	vScale := float64(height) / float64(img.Height())
+	vScale := float64(height) / float64(img.PageHeight())
 	if upscale || (hScale <= 1 && vScale <= 1) {
 		err := img.ResizeWithVScale(hScale, vScale, vips.KernelAuto)
 		if err != nil {
@@ -334,6 +339,11 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 	}
 
 	return img, nil
+}
+
+func roundToDecimalPlaces(value float64, places int) float64 {
+	multiplier := math.Pow(10, float64(places))
+	return math.Round(value*multiplier) / multiplier
 }
 
 func ExportImage(img *vips.ImageRef, quality int, formats ...vips.ImageType) ([]byte, *vips.ImageMetadata, error) {
