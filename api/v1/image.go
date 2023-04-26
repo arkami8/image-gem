@@ -2,10 +2,9 @@ package v1
 
 import (
 	"fmt"
-	"html"
 	"io"
-	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -14,15 +13,26 @@ import (
 )
 
 const (
+	// maxImageSize is the maximum allowed image size in bytes.
 	maxImageSize = 5 * 1024 * 1024 // 5MB
+
+	// maxImageHeight is the maximum allowed image height in pixels.
+	maxImageHeight = 20000
+
+	// maxImageHeight is the maximum allowed image width in pixels.
+	maxImageWidth = 20000
 )
 
+// countingReader is a struct that wraps an io.Reader and counts the number of bytes read,
+// checking if it exceeds the maximum allowed image size.
 type countingReader struct {
 	reader       io.Reader
 	bytesRead    int64
 	maxImageSize int64
 }
 
+// Read reads from the underlying reader and increments the byte counter,
+// returning an error if the image size limit is exceeded.
 func (cr *countingReader) Read(p []byte) (int, error) {
 	n, err := cr.reader.Read(p)
 	cr.bytesRead += int64(n)
@@ -32,11 +42,23 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// ImageGet is an HTTP handler function for processing and transforming images based on URL query parameters.
+// It supports image resizing, rotation, blurring, sharpening, and format conversion, as well as stripping metadata.
 func ImageGet(w http.ResponseWriter, r *http.Request) {
 	slugs := mux.Vars(r)
-	targetUrl := normalizeURL(slugs["url"])
+	targetUrl, err := normalizeURL(slugs["url"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	height, width, err := parseDimensions(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rotation, err := parseRotation(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -54,7 +76,13 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sharpenAmount, blurAmount, err := parseSharpenBlur(r)
+	sharpenAmount, err := parseSharpen(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	blurAmount, err := parseBlur(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -140,8 +168,18 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	}
 	defer img.Close()
 
-	if stripMetadata {
-		err := img.RemoveMetadata()
+	if rotation != 0 {
+		// Check if the image has an alpha channel and add one if it's missing
+		if !img.HasAlpha() {
+			err := img.BandJoinConst([]float64{255})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Rotate the image
+		err := img.Similarity(1.0, float64(rotation), &vips.ColorRGBA{R: 0, G: 0, B: 0, A: 0}, 0, 0, 0, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -170,6 +208,14 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if stripMetadata {
+		err := img.RemoveMetadata()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	if convertToWebP {
 		targetFormat = vips.ImageTypeWEBP
 	}
@@ -181,84 +227,86 @@ func ImageGet(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(imgBytes)
 }
 
+// Helper functions for checking supported image formats, normalizing URLs,
+// parsing dimensions, rotations, quality, sharpening, blurring, and converting images.
+
 func isSupportedImageFormat(contentType string) bool {
-	supportedFormats := []string{
-		"image/jpeg",
-		"image/png",
-		"image/gif",
-		"image/svg+xml",
-		"image/webp",
-		"image/heic",
-		"image/heif",
-		"image/tiff",
-		"image/tif",
-		"image/avif",
-		"image/jp2",
-		"image/j2k",
+	supportedFormats := map[string]bool{
+		"image/jpeg":    true,
+		"image/png":     true,
+		"image/gif":     true,
+		"image/svg+xml": true,
+		"image/webp":    true,
+		"image/heic":    true,
+		"image/heif":    true,
+		"image/tiff":    true,
+		"image/tif":     true,
+		"image/avif":    true,
+		"image/jp2":     true,
+		"image/j2k":     true,
 	}
 
-	for _, format := range supportedFormats {
-		if contentType == format {
-			return true
-		}
-	}
-	return false
+	return supportedFormats[contentType]
 }
 
-func normalizeURL(url string) string {
-	url = html.EscapeString(url)
-	url = strings.ReplaceAll(url, "http:/", "http://")
-	url = strings.ReplaceAll(url, "https:/", "https://")
-	if !strings.Contains(url, "http:") && !strings.Contains(url, "https:") {
-		url = "https://" + url
+func normalizeURL(inputURL string) (string, error) {
+	// Add the scheme if it's missing
+	if !strings.HasPrefix(inputURL, "http://") && !strings.HasPrefix(inputURL, "https://") {
+		inputURL = "https://" + inputURL
 	}
-	return url
+
+	// Parse the URL
+	parsedURL, err := url.Parse(inputURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Make sure the URL has a valid scheme
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return "", fmt.Errorf("unsupported URL scheme: %s", parsedURL.Scheme)
+	}
+
+	return parsedURL.String(), nil
 }
 
 func parseDimensions(r *http.Request) (int, int, error) {
-	height, err := parseIntQueryParam(r, "h", "height")
+	height, err := parseIntQueryParam(r, 0, maxImageHeight, "h", "height")
 	if err != nil {
 		return 0, 0, err
 	}
-	width, err := parseIntQueryParam(r, "w", "width")
+	width, err := parseIntQueryParam(r, 0, maxImageWidth, "w", "width")
 	if err != nil {
 		return 0, 0, err
 	}
 	return height, width, nil
 }
 
-func parseQuality(r *http.Request) (int, error) {
-	quality, err := parseIntQueryParam(r, "q", "quality")
+func parseRotation(r *http.Request) (int, error) {
+	rotation, err := parseIntQueryParam(r, 0, 360, "rotate", "r")
 	if err != nil {
 		return 0, err
 	}
+	return rotation, nil
+}
 
-	if quality < 0 || quality > 100 {
-		return 0, fmt.Errorf("quality must be between 1 and 100")
+func parseQuality(r *http.Request) (int, error) {
+	quality, err := parseIntQueryParam(r, 1, 100, "q", "quality")
+	if err != nil {
+		return 0, err
 	}
-
 	return quality, nil
 }
 
-func parseSharpenBlur(r *http.Request) (float64, float64, error) {
-	sharpen, err := parseFloatQueryParam(r, "sharpen", "s")
-	if err != nil {
-		return 0, 0, err
-	}
-	blur, err := parseFloatQueryParam(r, "blur", "b")
-	if err != nil {
-		return 0, 0, err
-	}
-	return sharpen, blur, nil
-}
-
-func parseIntQueryParam(r *http.Request, keys ...string) (int, error) {
+func parseIntQueryParam(r *http.Request, min, max int, keys ...string) (int, error) {
 	for _, key := range keys {
 		value := r.URL.Query().Get(key)
 		if value != "" {
 			num, err := strconv.Atoi(value)
 			if err != nil {
-				return 0, fmt.Errorf("invalid value for %s: %v", key, err)
+				return 0, fmt.Errorf("invalid value for %s: %v (input: %s)", key, err, value)
+			}
+			if num < min || num > max {
+				return 0, fmt.Errorf("value for %s must be between %d and %d (input: %d)", key, min, max, num)
 			}
 			return num, nil
 		}
@@ -266,13 +314,24 @@ func parseIntQueryParam(r *http.Request, keys ...string) (int, error) {
 	return 0, nil
 }
 
-func parseFloatQueryParam(r *http.Request, keys ...string) (float64, error) {
+func parseSharpen(r *http.Request) (float64, error) {
+	return parseFloatQueryParam(r, 0, 1, "sharpen", "s")
+}
+
+func parseBlur(r *http.Request) (float64, error) {
+	return parseFloatQueryParam(r, 0, 1, "blur", "b")
+}
+
+func parseFloatQueryParam(r *http.Request, min, max float64, keys ...string) (float64, error) {
 	for _, key := range keys {
 		value := r.URL.Query().Get(key)
 		if value != "" {
 			num, err := strconv.ParseFloat(value, 64)
 			if err != nil {
-				return 0, fmt.Errorf("invalid value for %s: %v", key, err)
+				return 0, fmt.Errorf("invalid value for %s: %v (input: %s)", key, err, value)
+			}
+			if num < min || num > max {
+				return 0, fmt.Errorf("value for %s must be between %f and %f (input: %f)", key, min, max, num)
 			}
 			return num, nil
 		}
@@ -281,21 +340,11 @@ func parseFloatQueryParam(r *http.Request, keys ...string) (float64, error) {
 }
 
 func convertImageToWebP(r *http.Request) bool {
-	webpQueryParam := r.URL.Query().Get("webp")
-
-	if webpQueryParam == "force" {
-		return true
+	if r.URL.Query().Get("webp") != "auto" {
+		return false
 	}
 
-	if webpQueryParam == "auto" {
-		return isWebPSupported(r.Header.Get("Accept"))
-	}
-
-	return false
-}
-
-func isWebPSupported(acceptHeader string) bool {
-	return strings.Contains(acceptHeader, "image/webp")
+	return strings.Contains(r.Header.Get("Accept"), "image/webp")
 }
 
 func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.ImageRef, error) {
@@ -303,28 +352,18 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 		return img, nil
 	}
 
-	places := 1
-
-	if width == 0 {
-		scale := float64(height) / float64(img.PageHeight())
-		scale = roundToDecimalPlaces(scale, places)
-		if upscale || scale <= 1 {
-			err := img.Resize(scale, vips.KernelAuto)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return img, nil
+	scale := -1.0
+	if width == 0 && height != 0 {
+		scale = float64(height) / float64(img.PageHeight())
+	}
+	if height == 0 && width != 0 {
+		scale = float64(width) / float64(img.Width())
 	}
 
-	if height == 0 {
-		scale := float64(width) / float64(img.Width())
-		scale = roundToDecimalPlaces(scale, places)
-		if upscale || scale <= 1 {
-			err := img.Resize(scale, vips.KernelAuto)
-			if err != nil {
-				return nil, err
-			}
+	if (upscale || scale <= 1) && scale != -1.0 {
+		err := img.Resize(scale, vips.KernelAuto)
+		if err != nil {
+			return nil, err
 		}
 		return img, nil
 	}
@@ -339,11 +378,6 @@ func resizeImage(img *vips.ImageRef, width, height int, upscale bool) (*vips.Ima
 	}
 
 	return img, nil
-}
-
-func roundToDecimalPlaces(value float64, places int) float64 {
-	multiplier := math.Pow(10, float64(places))
-	return math.Round(value*multiplier) / multiplier
 }
 
 func ExportImage(img *vips.ImageRef, quality int, formats ...vips.ImageType) ([]byte, *vips.ImageMetadata, error) {
